@@ -1,6 +1,8 @@
 Param(
   [Parameter(Mandatory = $false)]
-  [string]$Version
+  [string]$Version,
+  [Parameter(Mandatory = $false)]
+  [int]$SplitSizeMB = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,7 +36,7 @@ if (Test-Path $cardsDir) {
   $wikiArtCount = (Get-ChildItem -Path $cardsDir -Recurse -Filter "wiki_art_*.jpg" | Measure-Object).Count
 }
 
-$manifest = @{
+$manifest = [ordered]@{
   version = $Version
   generated_at = (Get-Date).ToString("o")
   root = "Yu-Gi-Lect-DB"
@@ -46,14 +48,49 @@ $manifest = @{
   }
 }
 
-$manifestPath = Join-Path $dist "manifest.json"
-$manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $manifestPath -Encoding UTF8
-
 $zipName = "yu-gi-lect-db-$Version.zip"
 $zipPath = Join-Path $dist $zipName
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
 Compress-Archive -Path (Join-Path $dbRoot "*") -DestinationPath $zipPath
+
+if ($SplitSizeMB -gt 0) {
+  $partSize = $SplitSizeMB * 1MB
+  $parts = @()
+  $buffer = New-Object byte[] (4MB)
+  $index = 1
+  $in = [System.IO.File]::OpenRead($zipPath)
+  try {
+    while ($in.Position -lt $in.Length) {
+      $partName = "{0}.{1}" -f $zipName, $index.ToString("000")
+      $partPath = Join-Path $dist $partName
+      $out = [System.IO.File]::Create($partPath)
+      try {
+        $written = 0L
+        while ($written -lt $partSize -and $in.Position -lt $in.Length) {
+          $toRead = [Math]::Min($buffer.Length, $partSize - $written)
+          $read = $in.Read($buffer, 0, $toRead)
+          if ($read -le 0) { break }
+          $out.Write($buffer, 0, $read)
+          $written += $read
+        }
+      } finally {
+        $out.Close()
+      }
+      $parts += @{
+        name = $partName
+        size = (Get-Item $partPath).Length
+      }
+      $index++
+    }
+  } finally {
+    $in.Close()
+  }
+  $manifest.parts = $parts
+}
+
+$manifestPath = Join-Path $dist "manifest.json"
+$manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
 
 Write-Host "Manifest: $manifestPath"
 Write-Host "Zip: $zipPath"
